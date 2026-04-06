@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
-import { splitPdfIntoBatches } from '@/lib/pdf-utils';
+import { splitPdfIntoBatches, splitIntoIndividualPages } from '@/lib/pdf-utils';
 import InvoiceReviewTable from '@/components/InvoiceReviewTable';
 import DeliveryPartnerModal from '@/components/DeliveryPartnerModal';
 import {
@@ -240,7 +240,8 @@ export default function UploadPage() {
         }
       }
 
-      // Insert orders + items
+      // Insert orders + items — track IDs for invoice page upload
+      const ordersByInvoiceNo = {};
       for (const inv of parsed) {
         const { data: order, error: orderErr } = await supabase
           .from('orders')
@@ -263,6 +264,8 @@ export default function UploadPage() {
           .select()
           .single();
         if (orderErr) throw orderErr;
+
+        ordersByInvoiceNo[inv.invoice_no] = order.id;
 
         if (inv.items?.length) {
           const { error: itemsErr } = await supabase.from('order_items').insert(
@@ -287,6 +290,32 @@ export default function UploadPage() {
         });
       } catch (e) {
         console.warn('Fuzzy match failed (non-critical):', e);
+      }
+
+      // Upload individual invoice pages: parsed[i] → page i of flat pages array
+      // Non-critical — never blocks lot creation
+      try {
+        const pagesFlat = [];
+        for (const file of files) {
+          const pages = await splitIntoIndividualPages(file);
+          pagesFlat.push(...pages);
+        }
+        for (let i = 0; i < parsed.length && i < pagesFlat.length; i++) {
+          const inv = parsed[i];
+          const orderId = ordersByInvoiceNo[inv.invoice_no];
+          if (!orderId) continue;
+          const safeName = String(inv.invoice_no || `inv-${i + 1}`).replace(/[^a-zA-Z0-9]/g, '_');
+          const path = `invoices/${lot.id}/${safeName}.pdf`;
+          const { error: upErr } = await supabase.storage
+            .from('packing-photos')
+            .upload(path, pagesFlat[i], { contentType: 'application/pdf', upsert: true });
+          if (!upErr) {
+            const { data: { publicUrl } } = supabase.storage.from('packing-photos').getPublicUrl(path);
+            await supabase.from('orders').update({ invoice_pdf_url: publicUrl }).eq('id', orderId);
+          }
+        }
+      } catch (e) {
+        console.warn('Invoice page upload non-critical:', e);
       }
 
       toast.success(`Lot saved! ${parsed.length} orders created.`);

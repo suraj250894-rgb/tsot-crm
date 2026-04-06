@@ -38,8 +38,20 @@ ALTER TABLE catalog_metadata DISABLE ROW LEVEL SECURITY;
 -- (Run this if you already ran the previous migration — safe to run multiple times)
 ALTER TABLE invoice_lots ADD COLUMN IF NOT EXISTS label_pdf_url TEXT;
 
+-- 5. Invoice PDF URL — one PDF page per order, saved during lot upload
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_pdf_url TEXT;
+
+-- 6. Item-level status tracking (pending / picked / not_found)
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS item_status TEXT DEFAULT 'pending';
+
+-- Backfill existing rows so item_status matches is_collected
+UPDATE order_items SET item_status = 'picked'  WHERE is_collected = true;
+UPDATE order_items SET item_status = 'pending' WHERE is_collected = false OR is_collected IS NULL;
+
 -- ============================================================
 -- VERIFICATION QUERIES (run after migration to confirm)
 -- ============================================================
 -- SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('order_comments', 'catalog_metadata');
 -- SELECT column_name FROM information_schema.columns WHERE table_name = 'invoice_lots' AND column_name = 'label_pdf_url';
+-- SELECT column_name FROM information_schema.columns WHERE table_name = 'orders' AND column_name = 'invoice_pdf_url';
+-- SELECT column_name FROM information_schema.columns WHERE table_name = 'order_items' AND column_name = 'item_status';

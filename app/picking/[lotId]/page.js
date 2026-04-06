@@ -10,7 +10,7 @@ import OrderComments from '@/components/OrderComments';
 import {
   ArrowLeft, LayoutGrid, List, Search, CheckCircle2,
   Loader2, AlertTriangle, ImageOff, ChevronDown, ChevronRight,
-  MessageSquare, FileText, Upload
+  MessageSquare, FileText, Upload, XCircle, ExternalLink
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
@@ -45,8 +45,8 @@ export default function LotDetailPage() {
         supabase
           .from('orders')
           .select(`
-            id, invoice_no, customer_name, customer_city, picking_status, packing_photo_url,
-            order_items(id, product_name, quantity, unit_price, matched_catalog_image, matched_catalog_name, is_collected),
+            id, invoice_no, customer_name, customer_city, picking_status, packing_photo_url, invoice_pdf_url,
+            order_items(id, product_name, quantity, unit_price, matched_catalog_image, matched_catalog_name, is_collected, item_status),
             comment_count:order_comments(count)
           `)
           .eq('lot_id', lotId)
@@ -100,13 +100,22 @@ export default function LotDetailPage() {
           totalQty: 0,
           itemIds: [],
           is_collected: true,
+          _anyNotFound: false,
         };
       }
       map[key].totalQty += item.quantity || 1;
       map[key].itemIds.push(item.id);
       if (!item.is_collected) map[key].is_collected = false;
+      if (item.item_status === 'not_found') map[key]._anyNotFound = true;
     }
-    return Object.values(map).sort((a, b) => Number(a.is_collected) - Number(b.is_collected));
+    // Derive item_status for the group
+    for (const g of Object.values(map)) {
+      if (g.is_collected) g.item_status = 'picked';
+      else if (g._anyNotFound) g.item_status = 'not_found';
+      else g.item_status = 'pending';
+    }
+    const statusOrder = { pending: 0, not_found: 1, picked: 2 };
+    return Object.values(map).sort((a, b) => (statusOrder[a.item_status] ?? 0) - (statusOrder[b.item_status] ?? 0));
   }, [items]);
 
   const filteredProducts = useMemo(() => {
@@ -117,17 +126,43 @@ export default function LotDetailPage() {
     );
   }, [uniqueProducts, search]);
 
-  const allCollected = items.length > 0 && items.every((i) => i.is_collected);
-  const collectedCount = items.filter((i) => i.is_collected).length;
+  const pickedCount   = items.filter((i) => i.item_status === 'picked').length;
+  const notFoundCount = items.filter((i) => i.item_status === 'not_found').length;
+  const collectedCount = pickedCount; // backward-compat alias
+  const allDone    = items.length > 0 && items.every((i) => i.item_status === 'picked' || i.item_status === 'not_found');
+  const allPicked  = items.length > 0 && items.every((i) => i.item_status === 'picked');
+  const allCollected = allDone; // for existing button checks
 
   const toggleProduct = async (product) => {
-    const { error } = await supabase.from('order_items').update({ is_collected: !product.is_collected }).in('id', product.itemIds);
+    const markPicked = product.item_status !== 'picked';
+    const { error } = await supabase.from('order_items')
+      .update({ is_collected: markPicked, item_status: markPicked ? 'picked' : 'pending' })
+      .in('id', product.itemIds);
     if (error) { toast.error('Update failed'); return; }
     fetchData();
   };
 
   const toggleItem = async (item) => {
-    const { error } = await supabase.from('order_items').update({ is_collected: !item.is_collected }).eq('id', item.id);
+    const markPicked = item.item_status !== 'picked';
+    const { error } = await supabase.from('order_items')
+      .update({ is_collected: markPicked, item_status: markPicked ? 'picked' : 'pending' })
+      .eq('id', item.id);
+    if (error) { toast.error('Update failed'); return; }
+    fetchData();
+  };
+
+  const markProductNotFound = async (product) => {
+    const { error } = await supabase.from('order_items')
+      .update({ is_collected: false, item_status: 'not_found' })
+      .in('id', product.itemIds);
+    if (error) { toast.error('Update failed'); return; }
+    fetchData();
+  };
+
+  const markItemNotFound = async (item) => {
+    const { error } = await supabase.from('order_items')
+      .update({ is_collected: false, item_status: 'not_found' })
+      .eq('id', item.id);
     if (error) { toast.error('Update failed'); return; }
     fetchData();
   };
@@ -170,7 +205,13 @@ export default function LotDetailPage() {
   const markAllCollected = async () => {
     setMarking(true);
     try {
-      await supabase.from('order_items').update({ is_collected: true }).in('id', items.map((i) => i.id));
+      // Only update items that aren't already not_found
+      const toPickIds = items.filter((i) => i.item_status !== 'not_found').map((i) => i.id);
+      if (toPickIds.length > 0) {
+        await supabase.from('order_items')
+          .update({ is_collected: true, item_status: 'picked' })
+          .in('id', toPickIds);
+      }
       await supabase.from('orders').update({ picking_status: 'picked' }).eq('lot_id', lotId);
       await supabase.from('invoice_lots').update({ status: 'picked' }).eq('id', lotId);
       toast.success('Lot marked as fully picked!');
@@ -250,13 +291,30 @@ export default function LotDetailPage() {
       <div className="card p-4 mb-4">
         <div className="flex justify-between text-sm font-medium text-tea-700 mb-2">
           <span>Items collected</span>
-          <span className={allCollected ? 'text-brand-success' : ''}>{collectedCount} / {items.length}</span>
+          <span className="flex items-center gap-2">
+            <span className={allPicked ? 'text-brand-success' : ''}>{pickedCount} / {items.length}</span>
+            {notFoundCount > 0 && (
+              <span className="flex items-center gap-1 text-xs text-red-500 font-medium">
+                <XCircle className="w-3 h-3" />{notFoundCount} not found
+              </span>
+            )}
+          </span>
         </div>
-        <div className="w-full bg-tea-100 rounded-full h-3">
+        {/* 3-segment bar: green = picked, red = not_found, gray = pending */}
+        <div className="relative w-full bg-tea-100 rounded-full h-3 overflow-hidden">
           <div
-            className={clsx('h-3 rounded-full transition-all duration-500', allCollected ? 'bg-brand-success' : 'bg-tea-400')}
-            style={{ width: items.length ? `${(collectedCount / items.length) * 100}%` : '0%' }}
+            className={clsx('absolute left-0 h-3 transition-all duration-500 rounded-l-full', allPicked ? 'bg-brand-success rounded-r-full' : 'bg-brand-success')}
+            style={{ width: items.length ? `${(pickedCount / items.length) * 100}%` : '0%' }}
           />
+          {notFoundCount > 0 && (
+            <div
+              className="absolute h-3 bg-red-400 transition-all duration-500"
+              style={{
+                left: items.length ? `${(pickedCount / items.length) * 100}%` : '0%',
+                width: items.length ? `${(notFoundCount / items.length) * 100}%` : '0%',
+              }}
+            />
+          )}
         </div>
       </div>
 
@@ -293,7 +351,12 @@ export default function LotDetailPage() {
             <div className="col-span-full text-center py-12 text-stone-400">No products found</div>
           ) : (
             filteredProducts.map((p) => (
-              <ProductCard key={p.key} product={p} onToggle={() => toggleProduct(p)} />
+              <ProductCard
+                key={p.key}
+                product={p}
+                onToggle={() => toggleProduct(p)}
+                onMarkNotFound={p.item_status !== 'picked' ? () => markProductNotFound(p) : undefined}
+              />
             ))
           )}
         </div>
@@ -315,6 +378,18 @@ export default function LotDetailPage() {
                     <span className={order.picking_status === 'picked' ? 'badge-picked' : 'badge-pending'}>
                       {order.picking_status === 'picked' ? 'Picked' : 'Pending'}
                     </span>
+                    {order.invoice_pdf_url && (
+                      <a
+                        href={order.invoice_pdf_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="flex items-center gap-0.5 text-xs text-tea-400 hover:text-tea-600 transition-colors"
+                        title="View Invoice PDF"
+                      >
+                        <FileText className="w-3 h-3" />PDF
+                      </a>
+                    )}
                     {order._commentCount > 0 && (
                       <span className="flex items-center gap-0.5 text-xs text-tea-500">
                         <MessageSquare className="w-3 h-3" />{order._commentCount}
@@ -349,6 +424,7 @@ export default function LotDetailPage() {
                         <ProductCard
                           product={{ ...item, totalQty: item.quantity }}
                           onToggle={() => toggleItem(item)}
+                          onMarkNotFound={item.item_status !== 'picked' ? () => markItemNotFound(item) : undefined}
                           compact
                         />
                       </div>
@@ -373,25 +449,29 @@ export default function LotDetailPage() {
       {/* Fixed bottom bar */}
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-tea-200 px-4 py-3 flex items-center justify-between gap-3 shadow-warm-lg z-20">
         <div className="text-sm text-stone-600">
-          <span className={clsx('font-bold', allCollected ? 'text-brand-success' : 'text-tea-800')}>
-            {collectedCount}/{items.length}
+          <span className={clsx('font-bold', allPicked ? 'text-brand-success' : notFoundCount > 0 ? 'text-red-500' : 'text-tea-800')}>
+            {pickedCount}/{items.length}
           </span>
-          <span className="text-stone-400 ml-1 hidden sm:inline">items collected</span>
+          <span className="text-stone-400 ml-1 hidden sm:inline">picked</span>
+          {notFoundCount > 0 && (
+            <span className="text-red-500 ml-2 text-xs font-medium">{notFoundCount} not found</span>
+          )}
         </div>
         <button
           onClick={() => setConfirmModal(true)}
-          disabled={!allCollected || marking || lot.status === 'picked'}
+          disabled={!allDone || marking || lot.status === 'picked'}
           className={clsx(
             'text-sm font-medium px-5 py-2.5 rounded-xl transition-all flex items-center gap-2 min-h-[44px]',
             lot.status === 'picked'
               ? 'bg-brand-success text-white cursor-default opacity-80'
-              : allCollected
-              ? 'bg-brand-success text-white hover:shadow-warm-md active:scale-[0.98]'
+              : allDone
+              ? notFoundCount > 0 ? 'bg-tea-600 text-white hover:shadow-warm-md active:scale-[0.98]'
+                                  : 'bg-brand-success text-white hover:shadow-warm-md active:scale-[0.98]'
               : 'bg-tea-100 text-stone-400 cursor-not-allowed'
           )}
         >
           <CheckCircle2 className="w-4 h-4" />
-          {lot.status === 'picked' ? 'Already Picked' : 'Mark All Collected'}
+          {lot.status === 'picked' ? 'Already Picked' : notFoundCount > 0 ? 'Mark Complete' : 'Mark All Collected'}
         </button>
       </div>
 
@@ -405,6 +485,14 @@ export default function LotDetailPage() {
               <p className="text-sm text-stone-500 mt-2">
                 This will mark <strong>{orders.length} orders</strong> as picked and update the lot status to &ldquo;Picked&rdquo;.
               </p>
+              {notFoundCount > 0 && (
+                <div className="mt-3 flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-left">
+                  <XCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+                  <p className="text-xs text-red-700">
+                    <strong>{notFoundCount} item(s) could not be found</strong> and will be recorded as &ldquo;Not Found&rdquo;.
+                  </p>
+                </div>
+              )}
             </div>
             <div className="flex gap-3">
               <button onClick={() => setConfirmModal(false)} className="btn-secondary flex-1">Cancel</button>

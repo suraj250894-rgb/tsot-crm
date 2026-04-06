@@ -8,7 +8,7 @@ import { CommentsModal, CommentsBadge } from '@/components/OrderComments';
 import {
   Search, Download, ChevronUp, ChevronDown,
   ChevronLeft, ChevronRight, ImageOff, RefreshCw,
-  ExternalLink, Trash2, Clock, AlertCircle, FileText
+  ExternalLink, Trash2, Clock, AlertCircle, FileText, XCircle
 } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import toast from 'react-hot-toast';
@@ -26,6 +26,18 @@ function fmtDate(val) {
 }
 function isPendingDispatch(o) {
   return o.picking_status === 'picked' && !o.courier_picked_up;
+}
+
+function getDisplayStatus(o) {
+  if (o.courier_picked_up) return 'dispatched';
+  if (isPendingDispatch(o)) return 'dispatch_pending';
+  const items = o.order_items || [];
+  if (items.length === 0) return o.picking_status === 'picked' ? 'picked' : 'pending';
+  const statuses = items.map((i) => i.item_status || 'pending');
+  if (statuses.every((s) => s === 'picked')) return 'picked';
+  if (statuses.some((s) => s === 'not_found')) return 'not_found';
+  if (statuses.some((s) => s === 'picked')) return 'picking';
+  return 'pending';
 }
 
 function SortIcon({ col, sortCol, sortDir }) {
@@ -71,9 +83,10 @@ export default function OrderTable() {
         .select(`
           id, invoice_no, invoice_date, customer_name, customer_city,
           total_amount, picking_status, courier_picked_up,
-          packing_photo_url, notes,
+          packing_photo_url, invoice_pdf_url, notes,
           lot:invoice_lots(id, lot_name, status, label_pdf_url, delivery_partner:delivery_partners(name)),
-          comment_count:order_comments(count)
+          comment_count:order_comments(count),
+          order_items(item_status)
         `, { count: 'exact' });
 
       if (search) {
@@ -84,6 +97,8 @@ export default function OrderTable() {
       if (filterStatus === 'picked')           q = q.eq('picking_status', 'picked').eq('courier_picked_up', false);
       if (filterStatus === 'dispatched')       q = q.eq('courier_picked_up', true);
       if (filterStatus === 'dispatch_pending') q = q.eq('picking_status', 'picked').eq('courier_picked_up', false);
+      // not_found is computed client-side; fetch wider range so filter is complete
+      if (filterStatus === 'not_found')        q = q.range(0, 999);
       if (dateFrom) q = q.gte('invoice_date', dateFrom);
       if (dateTo)   q = q.lte('invoice_date', dateTo);
 
@@ -94,17 +109,23 @@ export default function OrderTable() {
       const { data, count, error } = await q;
       if (error) throw error;
 
-      // Sort pending-dispatch rows to top when not specifically filtering
       const rows = (data || []).map((o) => ({
         ...o,
         _commentCount: Array.isArray(o.comment_count) ? (o.comment_count[0]?.count ?? 0) : 0,
+        _displayStatus: getDisplayStatus(o),
       }));
+
+      // Client-side filter for not_found (can't be expressed server-side without a join)
+      const filtered = filterStatus === 'not_found'
+        ? rows.filter((o) => o._displayStatus === 'not_found')
+        : rows;
+
+      // Sort pending-dispatch rows to top when not filtering
       if (!filterStatus) {
-        rows.sort((a, b) => Number(isPendingDispatch(b)) - Number(isPendingDispatch(a)));
+        filtered.sort((a, b) => Number(isPendingDispatch(b)) - Number(isPendingDispatch(a)));
       }
 
-      setOrders(rows);
-      setTotal(count || 0);
+      setTotal(filterStatus === 'not_found' ? filtered.length : (count || 0));
     } catch (err) {
       toast.error('Failed to load orders');
       console.error(err);
@@ -272,6 +293,8 @@ export default function OrderTable() {
           <select className="input w-auto text-sm" value={filterStatus} onChange={(e) => { setFilterStatus(e.target.value); setPage(0); }}>
             <option value="">All Statuses</option>
             <option value="pending">Pending Pick</option>
+            <option value="picking">Picking</option>
+            <option value="not_found">⚠ Not Found Items</option>
             <option value="picked">Picked</option>
             <option value="dispatch_pending">⚡ Pending Dispatch</option>
             <option value="dispatched">Dispatched</option>
@@ -349,7 +372,17 @@ export default function OrderTable() {
                       )}
                     >
                       <td className="px-3 py-2.5 whitespace-nowrap text-stone-500 text-xs">{fmtDate(order.invoice_date)}</td>
-                      <td className="px-3 py-2.5 font-mono text-xs text-stone-600 whitespace-nowrap">{order.invoice_no}</td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">
+                        <div className="flex items-center gap-1">
+                          <span className="font-mono text-xs text-stone-600">{order.invoice_no}</span>
+                          {order.invoice_pdf_url && (
+                            <a href={order.invoice_pdf_url} target="_blank" rel="noreferrer" title="View Invoice PDF"
+                              className="text-stone-300 hover:text-tea-500 transition-colors">
+                              <FileText className="w-3 h-3" />
+                            </a>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-3 py-2.5 font-medium text-tea-800 max-w-[150px] truncate">{order.customer_name}</td>
                       <td className="px-3 py-2.5 text-stone-500 whitespace-nowrap text-xs">{order.customer_city || '—'}</td>
                       <td className="px-3 py-2.5 whitespace-nowrap font-semibold text-tea-700">{fmtRupees(order.total_amount)}</td>
@@ -382,12 +415,20 @@ export default function OrderTable() {
                       </td>
                       <td className="px-3 py-2.5 whitespace-nowrap text-stone-500 text-xs">{order.lot?.delivery_partner?.name || '—'}</td>
                       <td className="px-3 py-2.5">
-                        {pendingDispatch ? (
+                        {order._displayStatus === 'dispatched' ? (
+                          <span className="badge-dispatched">Dispatched</span>
+                        ) : order._displayStatus === 'dispatch_pending' ? (
                           <span className="badge-dispatch-pending flex items-center gap-1">
                             <Clock className="w-3 h-3" /> Pending Dispatch
                           </span>
-                        ) : order.picking_status === 'picked' ? (
+                        ) : order._displayStatus === 'not_found' ? (
+                          <span className="badge-not-found flex items-center gap-1">
+                            <XCircle className="w-3 h-3" /> Not Found
+                          </span>
+                        ) : order._displayStatus === 'picked' ? (
                           <span className="badge-picked">Picked</span>
+                        ) : order._displayStatus === 'picking' ? (
+                          <span className="badge-picking-partial">Picking</span>
                         ) : (
                           <span className="badge-pending">Pending</span>
                         )}
@@ -485,12 +526,18 @@ export default function OrderTable() {
 
                     {/* Status row */}
                     <div className="flex items-center gap-2 mt-2.5 flex-wrap">
-                      {pendingDispatch ? (
+                      {order._displayStatus === 'dispatch_pending' ? (
                         <span className="badge-dispatch-pending flex items-center gap-1">
                           <Clock className="w-3 h-3" /> Pending Dispatch
                         </span>
-                      ) : order.picking_status === 'picked' ? (
+                      ) : order._displayStatus === 'not_found' ? (
+                        <span className="badge-not-found flex items-center gap-1">
+                          <XCircle className="w-3 h-3" /> Not Found
+                        </span>
+                      ) : order._displayStatus === 'picked' ? (
                         <span className="badge-picked">Picked</span>
+                      ) : order._displayStatus === 'picking' ? (
+                        <span className="badge-picking-partial">Picking</span>
                       ) : (
                         <span className="badge-pending">Pending</span>
                       )}
