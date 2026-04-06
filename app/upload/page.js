@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
+import { splitPdfIntoBatches } from '@/lib/pdf-utils';
 import InvoiceReviewTable from '@/components/InvoiceReviewTable';
 import DeliveryPartnerModal from '@/components/DeliveryPartnerModal';
 import {
@@ -94,6 +95,9 @@ export default function UploadPage() {
   // Step 4 — saving
   const [saving, setSaving] = useState(false);
 
+  // Batch parse progress: { current, total } — 0/0 means idle
+  const [parseProgress, setParseProgress] = useState({ current: 0, total: 0 });
+
   const fetchPartners = useCallback(async () => {
     const { data } = await supabase.from('delivery_partners').select('id, name').eq('is_active', true).order('name');
     setPartners(data || []);
@@ -121,24 +125,45 @@ export default function UploadPage() {
     setParsing(true);
     setParsed([]);
     setParseErrors([]);
+    setParseProgress({ current: 0, total: 0 });
+
     const results = [];
     const errors = [];
 
+    // Step 1 — split every PDF into 3-page batches client-side
+    const allBatches = []; // [{ batchFile, originalName }]
     for (const file of files) {
       try {
-        const formData = new FormData();
-        formData.append('file', file);
-        const res = await fetch('/api/parse-invoice', { method: 'POST', body: formData });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error || 'Parse failed');
-        // json.data = array of invoice items grouped by invoice_no
-        results.push(...json.data);
+        const batches = await splitPdfIntoBatches(file, 3);
+        batches.forEach((b) => allBatches.push({ batchFile: b, originalName: file.name }));
       } catch (err) {
-        errors.push({ file: file.name, error: err.message });
+        errors.push({ file: file.name, error: 'Failed to split PDF: ' + err.message });
       }
     }
 
-    // Group items by invoice_no
+    setParseProgress({ current: 0, total: allBatches.length });
+
+    // Step 2 — send each batch to the API sequentially
+    for (let i = 0; i < allBatches.length; i++) {
+      const { batchFile, originalName } = allBatches[i];
+      setParseProgress({ current: i + 1, total: allBatches.length });
+
+      try {
+        const formData = new FormData();
+        formData.append('file', batchFile);
+        const res = await fetch('/api/parse-invoice', { method: 'POST', body: formData });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || 'Parse failed');
+        results.push(...json.data);
+      } catch (err) {
+        // Record error once per original file
+        if (!errors.find((e) => e.file === originalName)) {
+          errors.push({ file: originalName, error: err.message });
+        }
+      }
+    }
+
+    // Step 3 — group line-items by invoice_no (same logic as before)
     const grouped = {};
     for (const item of results) {
       const key = item.invoice_no || `unknown-${Math.random()}`;
@@ -168,12 +193,13 @@ export default function UploadPage() {
     setSaving(false);
 
     if (errors.length > 0) {
-      toast.error(`${errors.length} file(s) failed to parse`);
+      toast.error(`${errors.length} batch(es) failed to parse`);
     } else {
-      toast.success(`Parsed ${Object.keys(grouped).length} invoices from ${files.length} file(s)`);
+      toast.success(`Parsed ${Object.keys(grouped).length} invoices from ${allBatches.length} batch(es)`);
     }
     setStep(3);
     setParsing(false);
+    setParseProgress({ current: 0, total: 0 });
   };
 
   const saveLot = async () => {
@@ -427,9 +453,16 @@ export default function UploadPage() {
               disabled={!canAdvance[2] || parsing}
               className="btn-primary flex-1 sm:flex-none justify-center"
             >
-              {parsing
-                ? <><Loader2 className="w-4 h-4 animate-spin" /> Parsing…</>
-                : <><Sparkles className="w-4 h-4" /> Parse Invoices</>}
+              {parsing ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  {parseProgress.total > 1
+                    ? `Batch ${parseProgress.current} of ${parseProgress.total}…`
+                    : 'Parsing…'}
+                </>
+              ) : (
+                <><Sparkles className="w-4 h-4" /> Parse Invoices</>
+              )}
             </button>
           </div>
         </div>
