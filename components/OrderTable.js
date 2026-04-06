@@ -125,6 +125,7 @@ export default function OrderTable() {
         filtered.sort((a, b) => Number(isPendingDispatch(b)) - Number(isPendingDispatch(a)));
       }
 
+      setOrders(filtered);
       setTotal(filterStatus === 'not_found' ? filtered.length : (count || 0));
     } catch (err) {
       toast.error('Failed to load orders');
