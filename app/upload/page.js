@@ -98,6 +98,9 @@ export default function UploadPage() {
   // Batch parse progress: { current, total } — 0/0 means idle
   const [parseProgress, setParseProgress] = useState({ current: 0, total: 0 });
 
+  // Label courier-code extraction progress: { current, total } — 0/0 means idle
+  const [labelParseProgress, setLabelParseProgress] = useState({ current: 0, total: 0 });
+
   const fetchPartners = useCallback(async () => {
     const { data } = await supabase.from('delivery_partners').select('id, name').eq('is_active', true).order('name');
     setPartners(data || []);
@@ -318,6 +321,70 @@ export default function UploadPage() {
         console.warn('Invoice page upload non-critical:', e);
       }
 
+      // Label PDF processing (non-critical — never blocks lot creation)
+      if (labelFile) {
+        try {
+          // Step 1 — split and save individual pages; map to orders by page index
+          const labelPages = await splitIntoIndividualPages(labelFile);
+          for (let i = 0; i < labelPages.length && i < parsed.length; i++) {
+            const pagePath = `labels/${lot.id}/label_p${i + 1}.pdf`;
+            const { error: pageErr } = await supabase.storage
+              .from('packing-photos')
+              .upload(pagePath, labelPages[i], { contentType: 'application/pdf', upsert: true });
+            if (pageErr) continue;
+            const { data: { publicUrl: pageUrl } } = supabase.storage.from('packing-photos').getPublicUrl(pagePath);
+            const orderId = ordersByInvoiceNo[parsed[i].invoice_no];
+            if (orderId) {
+              await supabase.from('orders').update({ label_pdf_url: pageUrl }).eq('id', orderId);
+            }
+          }
+
+          // Step 2 — render full PDF via pdfjs-dist, send each page as JPEG to Claude,
+          // match extracted invoice_no to orders and save courier_barcode + tracking_number
+          const pdfjsLib = await import('pdfjs-dist');
+          pdfjsLib.GlobalWorkerOptions.workerSrc =
+            `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+          const labelPdf = await pdfjsLib.getDocument({ data: new Uint8Array(await labelFile.arrayBuffer()) }).promise;
+          setLabelParseProgress({ current: 0, total: labelPdf.numPages });
+          for (let pi = 1; pi <= labelPdf.numPages; pi++) {
+            setLabelParseProgress({ current: pi, total: labelPdf.numPages });
+            try {
+              const page = await labelPdf.getPage(pi);
+              const viewport = page.getViewport({ scale: 2.0 });
+              const canvas = document.createElement('canvas');
+              canvas.width = viewport.width;
+              canvas.height = viewport.height;
+              await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+              const base64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+              const res = await fetch('/api/parse-labels', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ imageBase64: base64 }),
+              });
+              if (res.ok) {
+                const item = await res.json();
+                if (item.invoice_no) {
+                  const invoiceNo = String(item.invoice_no).replace(/^#/, '').trim();
+                  const orderId = ordersByInvoiceNo[invoiceNo];
+                  if (orderId) {
+                    await supabase.from('orders').update({
+                      courier_barcode: item.courier_barcode || null,
+                      tracking_number: item.tracking_number || null,
+                    }).eq('id', orderId);
+                  }
+                }
+              } else {
+                console.warn(`parse-labels page ${pi}: HTTP ${res.status}`);
+              }
+            } catch (e) {
+              console.error(`Label extraction page ${pi} failed:`, e);
+            }
+          }
+        } catch (e) {
+          console.warn('Label processing non-critical:', e);
+        }
+      }
+
       toast.success(`Lot saved! ${parsed.length} orders created.`);
       router.push('/');
     } catch (err) {
@@ -325,6 +392,7 @@ export default function UploadPage() {
       console.error(err);
     } finally {
       setSaving(false);
+      setLabelParseProgress({ current: 0, total: 0 });
     }
   };
 
@@ -538,7 +606,9 @@ export default function UploadPage() {
               className="btn-primary w-full sm:w-auto justify-center"
             >
               {saving
-                ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</>
+                ? labelParseProgress.total > 0
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Extracting courier codes… ({labelParseProgress.current}/{labelParseProgress.total})</>
+                  : <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</>
                 : <><CheckCircle2 className="w-4 h-4" /> Save Lot</>}
             </button>
           </div>

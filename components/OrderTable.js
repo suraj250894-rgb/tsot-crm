@@ -30,6 +30,7 @@ function isPendingDispatch(o) {
 
 function getDisplayStatus(o) {
   if (o.courier_picked_up) return 'dispatched';
+  if (o.is_packed) return 'packed';
   if (isPendingDispatch(o)) return 'dispatch_pending';
   const items = o.order_items || [];
   if (items.length === 0) return o.picking_status === 'picked' ? 'picked' : 'pending';
@@ -82,8 +83,8 @@ export default function OrderTable() {
         .from('orders')
         .select(`
           id, invoice_no, invoice_date, customer_name, customer_city,
-          total_amount, picking_status, courier_picked_up,
-          packing_photo_url, invoice_pdf_url, notes,
+          total_amount, picking_status, courier_picked_up, is_packed,
+          packing_photo_url, invoice_pdf_url, label_pdf_url, courier_barcode, notes,
           lot:invoice_lots(id, lot_name, status, label_pdf_url, delivery_partner:delivery_partners(name)),
           comment_count:order_comments(count),
           order_items(item_status)
@@ -97,8 +98,9 @@ export default function OrderTable() {
       if (filterStatus === 'picked')           q = q.eq('picking_status', 'picked').eq('courier_picked_up', false);
       if (filterStatus === 'dispatched')       q = q.eq('courier_picked_up', true);
       if (filterStatus === 'dispatch_pending') q = q.eq('picking_status', 'picked').eq('courier_picked_up', false);
-      // not_found is computed client-side; fetch wider range so filter is complete
+      // not_found and packed are computed client-side; fetch wider range so filter is complete
       if (filterStatus === 'not_found')        q = q.range(0, 999);
+      if (filterStatus === 'packed')           q = q.eq('is_packed', true);
       if (dateFrom) q = q.gte('invoice_date', dateFrom);
       if (dateTo)   q = q.lte('invoice_date', dateTo);
 
@@ -297,6 +299,7 @@ export default function OrderTable() {
             <option value="picking">Picking</option>
             <option value="not_found">⚠ Not Found Items</option>
             <option value="picked">Picked</option>
+            <option value="packed">Packed</option>
             <option value="dispatch_pending">⚡ Pending Dispatch</option>
             <option value="dispatched">Dispatched</option>
           </select>
@@ -387,8 +390,8 @@ export default function OrderTable() {
                       <td className="px-3 py-2.5 font-medium text-tea-800 max-w-[150px] truncate">{order.customer_name}</td>
                       <td className="px-3 py-2.5 text-stone-500 whitespace-nowrap text-xs">{order.customer_city || '—'}</td>
                       <td className="px-3 py-2.5 whitespace-nowrap font-semibold text-tea-700">{fmtRupees(order.total_amount)}</td>
-                      <td className="px-3 py-2.5 max-w-[150px]">
-                        <div className="flex items-center gap-1">
+                      <td className="px-3 py-2.5 max-w-[180px]">
+                        <div className="flex items-center gap-1 flex-wrap">
                           <a href={`/picking/${order.lot?.id}`} className="text-tea-500 hover:text-tea-700 hover:underline text-xs truncate">
                             {order.lot?.lot_name}
                           </a>
@@ -397,7 +400,7 @@ export default function OrderTable() {
                               href={order.lot.label_pdf_url}
                               target="_blank"
                               rel="noreferrer"
-                              title="View label PDF"
+                              title="View lot label PDF"
                               className="text-stone-300 hover:text-tea-500 transition-colors flex-shrink-0"
                             >
                               <FileText className="w-3 h-3" />
@@ -413,11 +416,36 @@ export default function OrderTable() {
                             </button>
                           )}
                         </div>
+                        {order.courier_barcode && (
+                          <div className="flex items-center gap-1 mt-0.5">
+                            {order.label_pdf_url ? (
+                              <a
+                                href={order.label_pdf_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                title="View shipping label"
+                                className="font-mono text-[10px] text-tea-500 hover:text-tea-700 hover:underline transition-colors"
+                              >
+                                {order.courier_barcode}
+                              </a>
+                            ) : (
+                              <span className="font-mono text-[10px] text-stone-400">{order.courier_barcode}</span>
+                            )}
+                            {order.label_pdf_url && (
+                              <a href={order.label_pdf_url} target="_blank" rel="noreferrer" title="Shipping label"
+                                className="text-stone-300 hover:text-tea-500 transition-colors flex-shrink-0">
+                                <FileText className="w-2.5 h-2.5" />
+                              </a>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-2.5 whitespace-nowrap text-stone-500 text-xs">{order.lot?.delivery_partner?.name || '—'}</td>
                       <td className="px-3 py-2.5">
                         {order._displayStatus === 'dispatched' ? (
                           <span className="badge-dispatched">Dispatched</span>
+                        ) : order._displayStatus === 'packed' ? (
+                          <span className="badge-packed">Packed</span>
                         ) : order._displayStatus === 'dispatch_pending' ? (
                           <span className="badge-dispatch-pending flex items-center gap-1">
                             <Clock className="w-3 h-3" /> Pending Dispatch
@@ -527,7 +555,11 @@ export default function OrderTable() {
 
                     {/* Status row */}
                     <div className="flex items-center gap-2 mt-2.5 flex-wrap">
-                      {order._displayStatus === 'dispatch_pending' ? (
+                      {order._displayStatus === 'dispatched' ? (
+                        <span className="badge-dispatched">Dispatched</span>
+                      ) : order._displayStatus === 'packed' ? (
+                        <span className="badge-packed">Packed</span>
+                      ) : order._displayStatus === 'dispatch_pending' ? (
                         <span className="badge-dispatch-pending flex items-center gap-1">
                           <Clock className="w-3 h-3" /> Pending Dispatch
                         </span>
