@@ -4,7 +4,9 @@
       "Bash(npm install:*)",
       "Bash(npm run:*)",
       "Bash(npx next:*)",
-      "Bash(node -e \"const p = require\\('pdfjs-dist/package.json'\\); console.log\\(p.version\\)\")"
+      "Bash(node -e \"const p = require\\('pdfjs-dist/package.json'\\); console.log\\(p.version\\)\")",
+      "Bash(node -e ':*)",
+      "Bash(node -e \"const p = require\\('pdfjs-dist/package.json'\\); console.log\\('version:', p.version\\);\")"
     ]
   }
 }

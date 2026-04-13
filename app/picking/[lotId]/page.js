@@ -380,49 +380,57 @@ export default function LotDetailPage() {
         console.warn('Label page split non-critical:', e);
       }
 
-      // Render full PDF via pdfjs-dist, send each page as JPEG to Claude, match by invoice_no
+      // Split label PDF into individual pages (pdf-lib) and send each as a
+      // PDF document to Claude via /api/parse-labels — no pdfjs-dist needed.
+      // Match by normalized invoice_no only — never by array index.
       try {
-        const byInvoiceNo = {};
+        const normInv = (v) => (v ? String(v).replace(/[^0-9]/g, '').trim() : '');
+
+        // Build lookup: normalizedInvoiceNo → orderId
+        const byInvoiceNo = new Map();
         for (const o of orders) {
-          if (o.invoice_no) byInvoiceNo[String(o.invoice_no).trim()] = o.id;
+          if (o.invoice_no) byInvoiceNo.set(normInv(o.invoice_no), o.id);
         }
-        const pdfjsLib = await import('pdfjs-dist');
-        pdfjsLib.GlobalWorkerOptions.workerSrc =
-          `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
-        const labelPdf = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
-        setLabelParseProgress({ current: 0, total: labelPdf.numPages });
-        for (let pi = 1; pi <= labelPdf.numPages; pi++) {
-          setLabelParseProgress({ current: pi, total: labelPdf.numPages });
+
+        const labelPages = await splitIntoIndividualPages(file);
+        setLabelParseProgress({ current: 0, total: labelPages.length });
+
+        for (let pi = 0; pi < labelPages.length; pi++) {
+          setLabelParseProgress({ current: pi + 1, total: labelPages.length });
           try {
-            const page = await labelPdf.getPage(pi);
-            const viewport = page.getViewport({ scale: 2.0 });
-            const canvas = document.createElement('canvas');
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-            const base64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+            const bytes  = await labelPages[pi].arrayBuffer();
+            const b64arr = new Uint8Array(bytes);
+            let binary   = '';
+            for (let i = 0; i < b64arr.length; i++) binary += String.fromCharCode(b64arr[i]);
+            const pdfBase64 = btoa(binary);
+
             const res = await fetch('/api/parse-labels', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ imageBase64: base64 }),
+              body: JSON.stringify({ pdfBase64 }),
             });
             if (res.ok) {
-              const item = await res.json();
-              if (item.invoice_no) {
-                const invoiceNo = String(item.invoice_no).replace(/^#/, '').trim();
-                const orderId = byInvoiceNo[invoiceNo];
-                if (orderId) {
-                  await supabase.from('orders').update({
-                    courier_barcode: item.courier_barcode || null,
-                    tracking_number: item.tracking_number || null,
-                  }).eq('id', orderId);
-                }
+              const item   = await res.json();
+              const rawNo  = item.invoice_no ?? null;
+              const normNo = normInv(rawNo);
+              const orderId = normNo ? byInvoiceNo.get(normNo) : undefined;
+              console.log(
+                `[labels] picking page ${pi + 1}: raw="${rawNo}" norm="${normNo}" → orderId="${orderId ?? 'NOT FOUND'}"`
+              );
+              if (orderId) {
+                await supabase.from('orders').update({
+                  courier_barcode: item.courier_barcode || null,
+                  tracking_number: item.tracking_number || null,
+                }).eq('id', orderId);
+              } else if (!normNo) {
+                console.warn(`[labels] picking page ${pi + 1}: no invoice_no returned`, item);
               }
             } else {
-              console.warn(`parse-labels page ${pi}: HTTP ${res.status}`);
+              const errText = await res.text().catch(() => '');
+              console.warn(`[labels] picking page ${pi + 1}: HTTP ${res.status}`, errText.slice(0, 200));
             }
           } catch (e) {
-            console.error(`Label extraction page ${pi} failed:`, e);
+            console.error(`[labels] picking page ${pi + 1} failed:`, e);
           }
         }
       } catch (e) {

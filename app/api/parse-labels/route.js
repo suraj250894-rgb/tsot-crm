@@ -8,9 +8,9 @@ export async function POST(request) {
       return NextResponse.json({ error: 'ANTHROPIC_API_KEY not configured' }, { status: 500 });
     }
 
-    const { imageBase64 } = await request.json();
-    if (!imageBase64) {
-      return NextResponse.json({ error: 'No imageBase64 provided' }, { status: 400 });
+    const { pdfBase64 } = await request.json();
+    if (!pdfBase64) {
+      return NextResponse.json({ error: 'No pdfBase64 provided' }, { status: 400 });
     }
 
     const client = new Anthropic({ apiKey });
@@ -23,11 +23,11 @@ export async function POST(request) {
           role: 'user',
           content: [
             {
-              type: 'image',
+              type: 'document',
               source: {
                 type: 'base64',
-                media_type: 'image/jpeg',
-                data: imageBase64,
+                media_type: 'application/pdf',
+                data: pdfBase64,
               },
             },
             {
