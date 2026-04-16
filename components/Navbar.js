@@ -13,7 +13,6 @@ const navLinks = [
   { href: '/',         label: 'Dashboard', icon: LayoutDashboard },
   { href: '/upload',   label: 'Upload',    icon: Upload },
   { href: '/picking',  label: 'Picking',   icon: PackageCheck },
-  { href: '/partners', label: 'Partners',  icon: Users },
   { href: '/catalog',  label: 'Catalog',   icon: BookOpen },
 ];
 

@@ -338,7 +338,6 @@ export default function OrderTable() {
                 <Th                      label="Lot" />
                 <Th                      label="Partner" />
                 <Th col="picking_status" label="Status" />
-                <Th                      label="Courier" />
                 <Th                      label="Photo" />
                 <Th                      label="Notes" />
               </tr>
@@ -461,14 +460,6 @@ export default function OrderTable() {
                         ) : (
                           <span className="badge-pending">Pending</span>
                         )}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <input
-                          type="checkbox"
-                          checked={!!order.courier_picked_up}
-                          onChange={() => toggleCourierPickup(order)}
-                          className="w-4 h-4 rounded accent-tea-600 cursor-pointer"
-                        />
                       </td>
                       <td className="px-3 py-2.5">
                         {order.packing_photo_url ? (
