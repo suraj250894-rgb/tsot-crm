@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase';
 import LotCard from '@/components/LotCard';
 import DeleteLotModal from '@/components/DeleteLotModal';
 import { PackageCheck, Loader2, RefreshCw, Inbox } from 'lucide-react';
+import { format, parseISO } from 'date-fns';
 import toast from 'react-hot-toast';
 
 export default function PickingPage() {
@@ -18,7 +19,7 @@ export default function PickingPage() {
       const { data, error } = await supabase
         .from('invoice_lots')
         .select(`
-          id, lot_name, status, upload_date, total_orders, label_pdf_url,
+          id, lot_name, status, upload_date, total_orders, label_pdf_url, created_at,
           delivery_partner:delivery_partners(name),
           orders(id, picking_status)
         `)
@@ -50,8 +51,16 @@ export default function PickingPage() {
     return () => supabase.removeChannel(channel);
   }, [fetchLots]);
 
-  const activeLots = lots.filter((l) => l.status !== 'dispatched');
-  const doneLots = lots.filter((l) => l.status === 'dispatched');
+  // Group lots by calendar date (newest first — query already orders by created_at desc)
+  const dateGroupMap = new Map();
+  for (const lot of lots) {
+    const dateKey = lot.created_at
+      ? format(parseISO(lot.created_at), 'd MMM yyyy')
+      : 'Unknown Date';
+    if (!dateGroupMap.has(dateKey)) dateGroupMap.set(dateKey, []);
+    dateGroupMap.get(dateKey).push(lot);
+  }
+  const dateGroups = [...dateGroupMap.entries()]; // [[dateKey, [lot, ...]], ...]
 
   return (
     <div>
@@ -70,41 +79,57 @@ export default function PickingPage() {
         <div className="flex items-center justify-center py-20">
           <Loader2 className="w-8 h-8 animate-spin text-tea-400" />
         </div>
+      ) : lots.length === 0 ? (
+        <div className="card p-10 text-center text-stone-400">
+          <Inbox className="w-10 h-10 mx-auto mb-3 text-tea-200" />
+          <p className="font-medium">No lots yet</p>
+          <p className="text-sm mt-1">Upload invoice PDFs to create a picking lot.</p>
+        </div>
       ) : (
         <div className="space-y-8">
-          {/* Active lots */}
-          <section>
-            <h2 className="text-xs font-semibold text-stone-400 uppercase tracking-widest mb-3">
-              Active ({activeLots.length})
-            </h2>
-            {activeLots.length === 0 ? (
-              <div className="card p-10 text-center text-stone-400">
-                <Inbox className="w-10 h-10 mx-auto mb-3 text-tea-200" />
-                <p className="font-medium">No active lots</p>
-                <p className="text-sm mt-1">Upload invoice PDFs to create a picking lot.</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {activeLots.map((lot) => (
-                  <LotCard key={lot.id} lot={lot} onDelete={setDeleteLot} />
-                ))}
-              </div>
-            )}
-          </section>
+          {dateGroups.map(([dateKey, dateLots]) => {
+            const totalLots      = dateLots.length;
+            const pendingLots    = dateLots.filter((l) => l.status !== 'dispatched').length;
+            const dispatchedLots = dateLots.filter((l) => l.status === 'dispatched').length;
+            const totalOrders    = dateLots.reduce((s, l) => s + (l.total_orders || 0), 0);
 
-          {/* Dispatched lots */}
-          {doneLots.length > 0 && (
-            <section>
-              <h2 className="text-xs font-semibold text-stone-300 uppercase tracking-widest mb-3">
-                Dispatched ({doneLots.length})
-              </h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 opacity-50">
-                {doneLots.map((lot) => (
-                  <LotCard key={lot.id} lot={lot} />
-                ))}
-              </div>
-            </section>
-          )}
+            return (
+              <section key={dateKey}>
+                {/* Date header */}
+                <div className="flex items-center gap-3 mb-3">
+                  <h2 className="text-sm font-semibold text-tea-800">{dateKey}</h2>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-tea-100 text-tea-700 font-medium">
+                      {totalLots} lot{totalLots !== 1 ? 's' : ''}
+                    </span>
+                    {pendingLots > 0 && (
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">
+                        {pendingLots} pending
+                      </span>
+                    )}
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium">
+                      {totalOrders} orders
+                    </span>
+                    {dispatchedLots > 0 && (
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">
+                        {dispatchedLots} dispatched
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex-1 h-px bg-tea-100" />
+                </div>
+
+                {/* Lot cards — horizontal flow */}
+                <div className="flex flex-wrap gap-4">
+                  {dateLots.map((lot) => (
+                    <div key={lot.id} className={lot.status === 'dispatched' ? 'opacity-50' : ''}>
+                      <LotCard lot={lot} onDelete={lot.status !== 'dispatched' ? setDeleteLot : undefined} />
+                    </div>
+                  ))}
+                </div>
+              </section>
+            );
+          })}
         </div>
       )}
 

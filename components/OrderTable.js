@@ -8,7 +8,7 @@ import { CommentsModal, CommentsBadge } from '@/components/OrderComments';
 import {
   Search, Download, ChevronUp, ChevronDown,
   ChevronLeft, ChevronRight, ImageOff, RefreshCw,
-  ExternalLink, Trash2, Clock, AlertCircle, FileText, XCircle
+  ExternalLink, Trash2, Clock, AlertCircle, FileText, XCircle, Pencil
 } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import toast from 'react-hot-toast';
@@ -75,6 +75,7 @@ export default function OrderTable() {
   const [photoModal, setPhotoModal] = useState(null);
   const [deleteLot, setDeleteLot] = useState(null); // { id, lot_name, total_orders }
   const [commentsModal, setCommentsModal] = useState(null); // { orderId, label }
+  const [editBarcode, setEditBarcode] = useState(null); // { orderId, value }
 
   const fetchOrders = useCallback(async () => {
     setLoading(true);
@@ -185,6 +186,18 @@ export default function OrderTable() {
     if (error) { toast.error('Update failed'); return; }
     toast.success(newVal ? 'Courier pickup confirmed ✓' : 'Courier pickup unmarked');
     fetchOrders(); fetchStats();
+  };
+
+  const saveCourierBarcode = async () => {
+    if (!editBarcode) return;
+    const { error } = await supabase
+      .from('orders')
+      .update({ courier_barcode: editBarcode.value || null })
+      .eq('id', editBarcode.orderId);
+    if (error) { toast.error('Update failed'); return; }
+    toast.success('Courier code updated');
+    setEditBarcode(null);
+    fetchOrders();
   };
 
   const exportCsv = async () => {
@@ -415,9 +428,9 @@ export default function OrderTable() {
                             </button>
                           )}
                         </div>
-                        {order.courier_barcode && (
-                          <div className="flex items-center gap-1 mt-0.5">
-                            {order.label_pdf_url ? (
+                        <div className="flex items-center gap-1 mt-0.5">
+                          {order.courier_barcode && (
+                            order.label_pdf_url ? (
                               <a
                                 href={order.label_pdf_url}
                                 target="_blank"
@@ -429,15 +442,22 @@ export default function OrderTable() {
                               </a>
                             ) : (
                               <span className="font-mono text-[10px] text-stone-400">{order.courier_barcode}</span>
-                            )}
-                            {order.label_pdf_url && (
-                              <a href={order.label_pdf_url} target="_blank" rel="noreferrer" title="Shipping label"
-                                className="text-stone-300 hover:text-tea-500 transition-colors flex-shrink-0">
-                                <FileText className="w-2.5 h-2.5" />
-                              </a>
-                            )}
-                          </div>
-                        )}
+                            )
+                          )}
+                          {order.courier_barcode && order.label_pdf_url && (
+                            <a href={order.label_pdf_url} target="_blank" rel="noreferrer" title="Shipping label"
+                              className="text-stone-300 hover:text-tea-500 transition-colors flex-shrink-0">
+                              <FileText className="w-2.5 h-2.5" />
+                            </a>
+                          )}
+                          <button
+                            onClick={() => setEditBarcode({ orderId: order.id, value: order.courier_barcode || '' })}
+                            className="opacity-0 group-hover:opacity-100 p-0.5 text-stone-300 hover:text-tea-600 transition-all flex-shrink-0"
+                            title="Edit courier code"
+                          >
+                            <Pencil className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
                       </td>
                       <td className="px-3 py-2.5 whitespace-nowrap text-stone-500 text-xs">{order.lot?.delivery_partner?.name || '—'}</td>
                       <td className="px-3 py-2.5">
@@ -621,6 +641,40 @@ export default function OrderTable() {
           </>
         )}
       </div>
+
+      {/* ── Courier Barcode Edit Modal ───────────────── */}
+      {editBarcode && (
+        <div
+          className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
+          onClick={() => setEditBarcode(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-warm-lg w-full max-w-xs p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2">
+              <Pencil className="w-4 h-4 text-tea-500" />
+              <h3 className="font-semibold text-tea-800 text-sm">Edit Courier Code</h3>
+            </div>
+            <input
+              className="input font-mono text-sm"
+              value={editBarcode.value}
+              onChange={(e) => setEditBarcode((prev) => ({ ...prev, value: e.target.value }))}
+              placeholder="Enter courier barcode"
+              onKeyDown={(e) => { if (e.key === 'Enter') saveCourierBarcode(); if (e.key === 'Escape') setEditBarcode(null); }}
+              autoFocus
+            />
+            <div className="flex gap-2">
+              <button onClick={() => setEditBarcode(null)} className="btn-secondary text-sm flex-1 justify-center">
+                Cancel
+              </button>
+              <button onClick={saveCourierBarcode} className="btn-primary text-sm flex-1 justify-center">
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Photo Modal ───────────────────────────────── */}
       {photoModal && (

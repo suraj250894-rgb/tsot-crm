@@ -268,79 +268,21 @@ export default function UploadPage() {
   const [saving,     setSaving]     = useState(false);
   const [saveStatus, setSaveStatus] = useState('');
 
+  // Duplicate detection modal
+  const [duplicateModal, setDuplicateModal] = useState(null);
+  // null | { duplicates: [{invoice_no, lot_name, status}], pendingMap: {} }
+
   // ── Processing ────────────────────────────────────────────────────────
-  const processAll = async () => {
-    if (!invoiceFiles.length) { toast.error('Upload at least one invoice PDF'); return; }
-    setProcessing(true);
-    setProcessStatus('');
-    setProcessProgress({ current: 0, total: 0 });
 
+  // Continues after duplicate check resolves (label parsing → grouping → review step).
+  const continueAfterCheck = async (invoiceMap) => {
     try {
-      // ── 1. Split invoice PDFs into batches and parse ─────────────────
-      setProcessStatus('Splitting invoices into batches...');
-      const allBatches = [];
-      for (const file of invoiceFiles) {
-        const batches = await splitPdfIntoBatches(file, 3);
-        batches.forEach((b) => allBatches.push(b));
-      }
-      setProcessProgress({ current: 0, total: allBatches.length });
-
-      const rawItems = [];
-      for (let i = 0; i < allBatches.length; i++) {
-        setProcessStatus(`Parsing invoices... (batch ${i + 1} of ${allBatches.length})`);
-        setProcessProgress({ current: i + 1, total: allBatches.length });
-        try {
-          const fd = new FormData();
-          fd.append('file', allBatches[i]);
-          const res = await fetch('/api/parse-invoice', { method: 'POST', body: fd });
-          const json = await res.json();
-          if (res.ok) rawItems.push(...(json.data || []));
-        } catch (e) { console.error(`Batch ${i + 1} failed:`, e); }
-      }
-
-      // Group raw line-items by invoice_no
-      const invoiceMap = {};
-      for (const item of rawItems) {
-        const key = item.invoice_no || `unknown-${Object.keys(invoiceMap).length}`;
-        if (!invoiceMap[key]) {
-          invoiceMap[key] = {
-            invoice_no:      item.invoice_no,
-            invoice_date:    item.invoice_date,
-            customer_name:   item.customer_name,
-            customer_city:   item.customer_city,
-            customer_state:  item.customer_state,
-            customer_pin:    item.customer_pin,
-            customer_phone:  item.customer_phone,
-            customer_email:  item.customer_email,
-            payment_method:  item.payment_method,
-            total_amount:    item.total_amount,
-            discount_amount: item.discount_amount,
-            tax_amount:      item.tax_amount,
-            shipping_amount: item.shipping_amount,
-            items:           [],
-            // label fields:
-            courier_barcode:  null,
-            tracking_number:  null,
-            courier_name:     null,
-            labelMatched:     false,
-            _labelPageFile:   null,
-          };
-        }
-        invoiceMap[key].items.push({ name: item.name, qty: item.qty, price: item.price });
-      }
-      // Preserve parse order for invoice PDF page mapping during save
-      setInvoiceParseOrder(Object.values(invoiceMap));
-
       // ── 2. Split label PDFs and send each page to Claude as a PDF document ─
-      // Uses pdf-lib (same as invoice splitting) — no pdfjs-dist needed.
-      // Collect results into a Map keyed by normalizedInvoiceNo, then attach
-      // to invoices in a separate pass. Never use positional/index matching.
-      // labelExtracted: Map<normalizedInvoiceNo → { courier_barcode, tracking_number, courier_name, pageFile }>
       const labelExtracted = new Map();
 
       if (labelFiles.length > 0) {
         setProcessStatus('Splitting label PDFs...');
-        const allLabelPages = []; // one File per label page across all label PDFs
+        const allLabelPages = [];
         for (const labelFile of labelFiles) {
           try {
             const pages = await splitIntoIndividualPages(labelFile);
@@ -373,7 +315,7 @@ export default function UploadPage() {
               const ld = await res.json();
               const rawNo  = ld.invoice_no ?? null;
               const normNo = normalizeInvoiceNo(rawNo);
-              const matched = normNo !== '' && normalizeInvoiceNo !== null;
+              const matched = normNo !== '';
               console.log(
                 `[labels] page ${pi + 1}: raw="${rawNo}" → norm="${normNo}" — ${matched ? 'will match' : 'NO invoice_no, skipping'}`
               );
@@ -396,7 +338,6 @@ export default function UploadPage() {
       }
 
       // ── 3. Attach label data to invoices by normalised invoice_no only ──
-      // No index fallback — if there's no label match the invoice stays unmatched.
       setProcessStatus('Matching labels to invoices...');
       for (const inv of Object.values(invoiceMap)) {
         const normKey = normalizeInvoiceNo(inv.invoice_no);
@@ -457,6 +398,145 @@ export default function UploadPage() {
       setProcessStatus('');
       setProcessProgress({ current: 0, total: 0 });
     }
+  };
+
+  const processAll = async () => {
+    console.log('[DUPE CHECK] processAll STARTED');
+    alert('processAll started - check console');
+    if (!invoiceFiles.length) { toast.error('Upload at least one invoice PDF'); return; }
+    setProcessing(true);
+    setProcessStatus('');
+    setProcessProgress({ current: 0, total: 0 });
+
+    try {
+      // ── 1. Split invoice PDFs into batches and parse ─────────────────
+      setProcessStatus('Splitting invoices into batches...');
+      const allBatches = [];
+      for (const file of invoiceFiles) {
+        const batches = await splitPdfIntoBatches(file, 3);
+        batches.forEach((b) => allBatches.push(b));
+      }
+      setProcessProgress({ current: 0, total: allBatches.length });
+
+      const rawItems = [];
+      for (let i = 0; i < allBatches.length; i++) {
+        setProcessStatus(`Parsing invoices... (batch ${i + 1} of ${allBatches.length})`);
+        setProcessProgress({ current: i + 1, total: allBatches.length });
+        try {
+          const fd = new FormData();
+          fd.append('file', allBatches[i]);
+          const res = await fetch('/api/parse-invoice', { method: 'POST', body: fd });
+          const json = await res.json();
+          if (res.ok) rawItems.push(...(json.data || []));
+        } catch (e) { console.error(`Batch ${i + 1} failed:`, e); }
+      }
+
+      // Group raw line-items by invoice_no
+      const invoiceMap = {};
+      for (const item of rawItems) {
+        const key = item.invoice_no || `unknown-${Object.keys(invoiceMap).length}`;
+        if (!invoiceMap[key]) {
+          invoiceMap[key] = {
+            invoice_no:      item.invoice_no,
+            invoice_date:    item.invoice_date,
+            customer_name:   item.customer_name,
+            customer_city:   item.customer_city,
+            customer_state:  item.customer_state,
+            customer_pin:    item.customer_pin,
+            customer_phone:  item.customer_phone,
+            customer_email:  item.customer_email,
+            payment_method:  item.payment_method,
+            total_amount:    item.total_amount,
+            discount_amount: item.discount_amount,
+            tax_amount:      item.tax_amount,
+            shipping_amount: item.shipping_amount,
+            items:           [],
+            // label fields:
+            courier_barcode:  null,
+            tracking_number:  null,
+            courier_name:     null,
+            labelMatched:     false,
+            _labelPageFile:   null,
+          };
+        }
+        invoiceMap[key].items.push({ name: item.name, qty: item.qty, price: item.price });
+      }
+      setInvoiceParseOrder(Object.values(invoiceMap));
+
+      // ── Duplicate detection ──────────────────────────────────────────
+      // Fetch ALL orders and normalize both sides in JS to avoid .in() format mismatches.
+      setProcessStatus('Checking for duplicate invoices...');
+      const uploadedNorms = [...new Set(
+        Object.keys(invoiceMap).map(normalizeInvoiceNo).filter(Boolean)
+      )];
+      console.log('[DUPE CHECK] normalized invoice nos to check:', uploadedNorms);
+
+      console.log('[DUPE CHECK] about to query orders table');
+      const { data: allOrders, error: dupeErr } = await supabase
+        .from('orders')
+        .select('invoice_no, is_packed, courier_picked_up, lot_id, invoice_lots(lot_name)');
+      console.log('[DUPE CHECK] supabase response:', { data: allOrders, error: dupeErr });
+
+      const dupeSet = new Map();
+      for (const o of allOrders || []) {
+        const norm = normalizeInvoiceNo(o.invoice_no);
+        if (norm) dupeSet.set(norm, o);
+      }
+
+      const dupes = [];
+      for (const invNo of Object.keys(invoiceMap)) {
+        const norm = normalizeInvoiceNo(invNo);
+        if (norm && dupeSet.has(norm)) {
+          const row    = dupeSet.get(norm);
+          const status = row.courier_picked_up ? 'Dispatched' : row.is_packed ? 'Packed' : 'Uploaded';
+          dupes.push({
+            invoice_no: invNo,
+            lot_name:   row.invoice_lots?.lot_name || 'Unknown Lot',
+            status,
+          });
+        }
+      }
+      console.log('[DUPE CHECK] duplicates found:', dupes);
+
+      if (dupes.length > 0) {
+        // Pause processing — show modal and wait for user choice.
+        setDuplicateModal({ duplicates: dupes, pendingMap: invoiceMap });
+        setProcessing(false);
+        setProcessStatus('');
+        setProcessProgress({ current: 0, total: 0 });
+        return;
+      }
+
+      // No duplicates — proceed directly to label parsing + review.
+      await continueAfterCheck(invoiceMap);
+    } catch (err) {
+      toast.error('Processing failed: ' + err.message);
+      console.error(err);
+      setProcessing(false);
+      setProcessStatus('');
+      setProcessProgress({ current: 0, total: 0 });
+    }
+  };
+
+  // ── Duplicate modal handlers ─────────────────────────────────────────
+  const handleSkipDuplicates = () => {
+    if (!duplicateModal) return;
+    const { duplicates, pendingMap } = duplicateModal;
+    const dupeNorms = new Set(duplicates.map((d) => normalizeInvoiceNo(d.invoice_no)));
+    const filteredMap = Object.fromEntries(
+      Object.entries(pendingMap).filter(([, inv]) => !dupeNorms.has(normalizeInvoiceNo(inv.invoice_no)))
+    );
+    if (Object.keys(filteredMap).length === 0) {
+      toast.error('All invoices are duplicates — nothing left to upload.');
+      return;
+    }
+    setDuplicateModal(null);
+    setProcessing(true);
+    continueAfterCheck(filteredMap);
+  };
+
+  const handleCancelDuplicates = () => {
+    setDuplicateModal(null);
   };
 
   // ── Saving ────────────────────────────────────────────────────────────
@@ -742,6 +822,53 @@ export default function UploadPage() {
               Process{labelFiles.length > 0 ? ' Invoices & Labels' : ' Invoices'}
             </button>
           )}
+        </div>
+      )}
+
+      {/* ── DUPLICATE DETECTION MODAL ──────────────────────── */}
+      {duplicateModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl shadow-warm-lg w-full max-w-lg">
+            {/* Header */}
+            <div className="flex items-start gap-3 p-5 border-b border-amber-200">
+              <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+              <div>
+                <h2 className="font-semibold text-stone-800 text-base">Duplicate Invoices Detected</h2>
+                <p className="text-sm text-stone-500 mt-0.5">
+                  {duplicateModal.duplicates.length} invoice{duplicateModal.duplicates.length !== 1 ? 's' : ''} already exist{duplicateModal.duplicates.length === 1 ? 's' : ''} in the system.
+                </p>
+              </div>
+            </div>
+
+            {/* Duplicate list */}
+            <div className="p-5 max-h-64 overflow-y-auto space-y-2">
+              {duplicateModal.duplicates.map((d, i) => (
+                <div key={i} className="flex items-center gap-3 bg-white border border-amber-100 rounded-lg px-3 py-2">
+                  <div className="flex-1 min-w-0">
+                    <span className="text-sm font-medium text-tea-800">#{d.invoice_no}</span>
+                    <span className="text-xs text-stone-400 ml-2 truncate">→ {d.lot_name}</span>
+                  </div>
+                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full flex-shrink-0 ${
+                    d.status === 'Dispatched' ? 'bg-green-100 text-green-700'
+                    : d.status === 'Packed'   ? 'bg-blue-100 text-blue-700'
+                    : 'bg-stone-100 text-stone-600'
+                  }`}>
+                    {d.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-2 p-4 border-t border-amber-200 rounded-b-2xl">
+              <button onClick={handleCancelDuplicates} className="flex-1 btn-secondary text-sm justify-center">
+                Cancel Upload
+              </button>
+              <button onClick={handleSkipDuplicates} className="flex-1 btn-primary text-sm justify-center">
+                Skip Duplicates &amp; Continue
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
