@@ -14,7 +14,7 @@ import {
   ArrowLeft, LayoutGrid, List, Search, CheckCircle2,
   Loader2, AlertTriangle, ImageOff, ChevronDown, ChevronRight,
   MessageSquare, FileText, Upload, XCircle, Circle,
-  Download, Truck, Tag,
+  Download, Truck, Tag, Printer,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
@@ -35,6 +35,8 @@ export default function LotDetailPage() {
   const [marking, setMarking] = useState(false);
   const [expandedOrders, setExpandedOrders] = useState(new Set());
   const [labelUploading, setLabelUploading] = useState(false);
+  const [mergingInvoices, setMergingInvoices] = useState(false);
+  const [mergingLabels,   setMergingLabels]   = useState(false);
   const [labelParseProgress, setLabelParseProgress] = useState({ current: 0, total: 0 });
   const [packingOrderId, setPackingOrderId] = useState(null);
   const [dispatchSelected, setDispatchSelected] = useState(new Set());
@@ -448,6 +450,91 @@ export default function LotDetailPage() {
     }
   };
 
+  // ── Print helpers ─────────────────────────────────────────────────────
+  const printMergedPdfs = async (urlKey, setMerging, label) => {
+    const urls = orders.map((o) => o[urlKey]).filter(Boolean);
+    if (urls.length === 0) {
+      toast.error(`No ${label} available for this lot`);
+      return;
+    }
+    setMerging(true);
+    try {
+      const merged = await PDFDocument.create();
+      for (const url of urls) {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) { console.warn(`Skipping ${url}: HTTP ${res.status}`); continue; }
+          const bytes = await res.arrayBuffer();
+          const src   = await PDFDocument.load(bytes);
+          const copied = await merged.copyPages(src, src.getPageIndices());
+          copied.forEach((p) => merged.addPage(p));
+        } catch (e) {
+          console.warn(`Failed to fetch/merge ${url}:`, e);
+        }
+      }
+      const pdfBytes = await merged.save();
+      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const blobUrl = URL.createObjectURL(blob);
+      window.open(blobUrl, '_blank');
+      // Revoke after a short delay to allow the tab to load
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 30_000);
+    } catch (err) {
+      toast.error(`Merge failed: ${err.message}`);
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  const printLabels4up = async () => {
+    const urls = orders.map((o) => o.label_pdf_url).filter(Boolean);
+    if (urls.length === 0) { toast.error('No labels available for this lot'); return; }
+    setMergingLabels(true);
+    try {
+      // Fetch and embed every label page
+      const embeddable = []; // { doc, pageIndex }[] — one entry per label
+      for (const url of urls) {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) { console.warn(`Skipping label ${url}: HTTP ${res.status}`); continue; }
+          const src = await PDFDocument.load(await res.arrayBuffer());
+          embeddable.push({ src, pageIndex: 0 });
+        } catch (e) {
+          console.warn(`Failed to fetch label ${url}:`, e);
+        }
+      }
+
+      // 2×2 grid positions on an A4 page (595 × 842 pt, y is bottom-up in pdf-lib)
+      const CELL_W = 297;
+      const CELL_H = 421;
+      const GRID = [
+        { x: 0,   y: CELL_H },   // top-left
+        { x: 298, y: CELL_H },   // top-right
+        { x: 0,   y: 0      },   // bottom-left
+        { x: 298, y: 0      },   // bottom-right
+      ];
+
+      const merged = await PDFDocument.create();
+      for (let i = 0; i < embeddable.length; i += 4) {
+        const page = merged.addPage([595, 842]);
+        for (let slot = 0; slot < 4 && i + slot < embeddable.length; slot++) {
+          const { src, pageIndex } = embeddable[i + slot];
+          const [embedded] = await merged.embedPdf(src, [pageIndex]);
+          const { x, y } = GRID[slot];
+          page.drawPage(embedded, { x, y, width: CELL_W, height: CELL_H });
+        }
+      }
+
+      const pdfBytes = await merged.save();
+      const blobUrl  = URL.createObjectURL(new Blob([pdfBytes], { type: 'application/pdf' }));
+      window.open(blobUrl, '_blank');
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 30_000);
+    } catch (err) {
+      toast.error(`Merge failed: ${err.message}`);
+    } finally {
+      setMergingLabels(false);
+    }
+  };
+
   // ── Render ────────────────────────────────────────────────────────────
   if (loading) {
     return (
@@ -476,6 +563,26 @@ export default function LotDetailPage() {
         <div className="flex-1 min-w-0">
           <h1 className="font-serif text-xl text-tea-800 leading-tight">{lot.lot_name}</h1>
           <p className="text-sm text-stone-400 mt-0.5">{lot.delivery_partner?.name} · {orders.length} orders</p>
+
+          {/* Print buttons */}
+          <div className="flex flex-wrap gap-2 mt-2">
+            <button
+              onClick={() => printMergedPdfs('invoice_pdf_url', setMergingInvoices, 'invoices')}
+              disabled={mergingInvoices}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-tea-700 text-white text-xs rounded hover:bg-tea-800 disabled:opacity-60 transition-colors"
+            >
+              {mergingInvoices ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Printer className="w-3.5 h-3.5" />}
+              {mergingInvoices ? 'Merging…' : 'Print All Invoices'}
+            </button>
+            <button
+              onClick={printLabels4up}
+              disabled={mergingLabels}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-tea-700 text-white text-xs rounded hover:bg-tea-800 disabled:opacity-60 transition-colors"
+            >
+              {mergingLabels ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Printer className="w-3.5 h-3.5" />}
+              {mergingLabels ? 'Merging…' : 'Print All Labels'}
+            </button>
+          </div>
 
           {/* Label PDF */}
           <div className="mt-2">
