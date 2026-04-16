@@ -2,10 +2,10 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import {
   LayoutDashboard, Upload, PackageCheck, Users,
-  BookOpen, Leaf, Menu, X
+  BookOpen, Leaf, Menu, X, LogOut
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -18,7 +18,13 @@ const navLinks = [
 
 export default function Navbar() {
   const pathname = usePathname();
+  const router = useRouter();
   const [drawerOpen, setDrawerOpen] = useState(false);
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    router.replace('/login');
+  };
 
   // Close drawer on route change
   useEffect(() => { setDrawerOpen(false); }, [pathname]);
@@ -70,6 +76,16 @@ export default function Navbar() {
                 </Link>
               ))}
             </div>
+
+            {/* Desktop logout */}
+            <button
+              onClick={handleLogout}
+              className="hidden md:flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium text-tea-400 hover:bg-tea-700 hover:text-white transition-all duration-150"
+              title="Sign out"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Logout
+            </button>
 
             {/* Mobile hamburger */}
             <button
@@ -132,8 +148,14 @@ export default function Navbar() {
           ))}
         </nav>
 
-        <div className="px-5 py-4 border-t border-tea-700">
-          <p className="text-xs text-tea-500">The Secret of Tea · Internal Tools</p>
+        <div className="px-3 py-3 border-t border-tea-700">
+          <button
+            onClick={handleLogout}
+            className="flex items-center gap-3 w-full px-4 py-3 rounded-xl text-base font-medium text-tea-400 hover:bg-tea-700 hover:text-white transition-all duration-150"
+          >
+            <LogOut className="w-5 h-5" />
+            Logout
+          </button>
         </div>
       </div>
     </>
