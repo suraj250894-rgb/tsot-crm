@@ -2,7 +2,8 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
-import { splitPdfIntoBatches, splitIntoIndividualPages } from '@/lib/pdf-utils';
+import { splitIntoIndividualPages } from '@/lib/pdf-utils';
+import { PDFDocument } from 'pdf-lib';
 import {
   Upload, Loader2, CheckCircle2, ChevronRight, ChevronLeft,
   FilePlus, X, AlertTriangle, FileText, Package, ChevronDown, Sparkles,
@@ -13,31 +14,40 @@ import { useRouter } from 'next/navigation';
 
 const STEPS = ['Upload', 'Review', 'Save'];
 
-const PARTNER_NAMES = {
-  'BLUEDART':     'BlueDart',
-  'BLUE DART':    'BlueDart',
-  'DELHIVERY':    'Delhivery',
-  'DTDC':         'DTDC',
-  'AMAZON':       'Amazon Delivery',
-  'ECOM EXPRESS': 'Ecom Express',
-  'ECOM':         'Ecom Express',
-  'SHIPROCKET':   'Shiprocket',
-  'INDIA POST':   'India Post',
-  'XPRESSBEES':   'XpressBees',
-};
-
 function normalizeInvoiceNo(val) {
   if (!val) return '';
   return String(val).replace(/[^0-9]/g, '').trim();
 }
 
-function normalizePartnerName(raw) {
-  if (!raw) return null;
-  const upper = raw.toUpperCase().trim();
-  for (const [key, val] of Object.entries(PARTNER_NAMES)) {
-    if (upper.includes(key)) return val;
-  }
-  return raw.trim().split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+function normalizeCourierName(raw) {
+  if (!raw) return 'Unknown';
+  const lower = raw.toLowerCase().trim();
+
+  // Service-tier codes that are actually DTDC services
+  const serviceTypeMap = {
+    'sf':                    'DTDC',
+    'ar':                    'DTDC',
+    'b2c smart express':     'DTDC',
+    'b2c priority':          'DTDC',
+    'sf b2c smart express':  'DTDC',
+    'ar b2c priority':       'DTDC',
+  };
+  if (serviceTypeMap[lower]) return serviceTypeMap[lower];
+
+  // Brand normalisation (order matters — check substrings)
+  if (lower.includes('dtdc'))                                    return 'DTDC';
+  if (lower.includes('bluedart') || lower.includes('blue dart')) return 'BlueDart';
+  if (lower.includes('delhivery'))                               return 'Delhivery';
+  if (lower.includes('ekart'))                                   return 'Ekart';
+  if (lower.includes('shadowfax'))                               return 'Shadowfax';
+  if (lower.includes('ecom express') || lower.includes('ecomexpress')) return 'Ecom Express';
+  if (lower.includes('xpressbees'))                              return 'XpressBees';
+  if (lower.includes('india post') || lower.includes('speed post')) return 'India Post';
+  if (lower.includes('amazon'))                                  return 'Amazon Delivery';
+  if (lower.includes('shiprocket'))                              return 'Shiprocket';
+
+  // Fallback: title-case the raw value
+  return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
 }
 
 function parseInvoiceDate(str) {
@@ -358,7 +368,7 @@ export default function UploadPage() {
       const partnerGroups = {};
       for (const inv of Object.values(invoiceMap)) {
         const partnerName = inv.labelMatched
-          ? (normalizePartnerName(inv.courier_name) || 'Unknown Courier')
+          ? normalizeCourierName(inv.courier_name)
           : 'No Label';
         if (!partnerGroups[partnerName]) partnerGroups[partnerName] = [];
         partnerGroups[partnerName].push(inv);
@@ -409,57 +419,112 @@ export default function UploadPage() {
     setProcessProgress({ current: 0, total: 0 });
 
     try {
-      // ── 1. Split invoice PDFs into batches and parse ─────────────────
-      setProcessStatus('Splitting invoices into batches...');
-      const allBatches = [];
+      // ── 1. Split all invoice PDFs into individual pages ──────────────
+      setProcessStatus('Splitting invoices into pages...');
+      const pagesFlat = [];
       for (const file of invoiceFiles) {
-        const batches = await splitPdfIntoBatches(file, 3);
-        batches.forEach((b) => allBatches.push(b));
+        const pages = await splitIntoIndividualPages(file);
+        pagesFlat.push(...pages);
       }
-      setProcessProgress({ current: 0, total: allBatches.length });
 
-      const rawItems = [];
-      for (let i = 0; i < allBatches.length; i++) {
-        setProcessStatus(`Parsing invoices... (batch ${i + 1} of ${allBatches.length})`);
-        setProcessProgress({ current: i + 1, total: allBatches.length });
+      // ── 2. Detect invoice header on each page to find boundaries ─────
+      setProcessStatus('Detecting invoice boundaries...');
+      setProcessProgress({ current: 0, total: pagesFlat.length });
+      const invoiceGroups = []; // [{ invoiceNo, pages: [File, ...] }]
+      let currentGroup = null;
+      for (let i = 0; i < pagesFlat.length; i++) {
+        setProcessStatus(`Detecting invoice boundaries... (page ${i + 1} of ${pagesFlat.length})`);
+        setProcessProgress({ current: i + 1, total: pagesFlat.length });
         try {
           const fd = new FormData();
-          fd.append('file', allBatches[i]);
-          const res = await fetch('/api/parse-invoice', { method: 'POST', body: fd });
-          const json = await res.json();
-          if (res.ok) rawItems.push(...(json.data || []));
-        } catch (e) { console.error(`Batch ${i + 1} failed:`, e); }
+          fd.append('file', pagesFlat[i]);
+          const res       = await fetch('/api/detect-invoice-header', { method: 'POST', body: fd });
+          const detection = res.ok ? await res.json() : { has_invoice_header: false, invoice_no: null };
+          if (detection.has_invoice_header && detection.invoice_no) {
+            currentGroup = { invoiceNo: detection.invoice_no, pages: [pagesFlat[i]] };
+            invoiceGroups.push(currentGroup);
+            console.log(`[invoice-groups] page ${i + 1}: NEW invoice ${detection.invoice_no}`);
+          } else if (currentGroup) {
+            currentGroup.pages.push(pagesFlat[i]);
+            console.log(`[invoice-groups] page ${i + 1}: continuation of ${currentGroup.invoiceNo}`);
+          } else {
+            console.warn(`[invoice-groups] page ${i + 1}: orphan page with no previous invoice — skipping`);
+          }
+        } catch (e) {
+          console.warn(`[invoice-groups] page ${i + 1} detection failed:`, e);
+        }
       }
+      console.log(`[invoice-groups] detected ${invoiceGroups.length} invoices across ${pagesFlat.length} pages`);
+      invoiceGroups.forEach((g) =>
+        console.log(`[invoice-groups] invoice ${g.invoiceNo}: ${g.pages.length} page(s)`)
+      );
 
-      // Group raw line-items by invoice_no
+      // ── 3. Parse each invoice group as one merged PDF ─────────────────
+      setProcessProgress({ current: 0, total: invoiceGroups.length });
       const invoiceMap = {};
-      for (const item of rawItems) {
-        const key = item.invoice_no || `unknown-${Object.keys(invoiceMap).length}`;
-        if (!invoiceMap[key]) {
-          invoiceMap[key] = {
-            invoice_no:      item.invoice_no,
-            invoice_date:    item.invoice_date,
-            customer_name:   item.customer_name,
-            customer_city:   item.customer_city,
-            customer_state:  item.customer_state,
-            customer_pin:    item.customer_pin,
-            customer_phone:  item.customer_phone,
-            customer_email:  item.customer_email,
-            payment_method:  item.payment_method,
-            total_amount:    item.total_amount,
-            discount_amount: item.discount_amount,
-            tax_amount:      item.tax_amount,
-            shipping_amount: item.shipping_amount,
-            items:           [],
-            // label fields:
+      for (let gi = 0; gi < invoiceGroups.length; gi++) {
+        const group = invoiceGroups[gi];
+        setProcessStatus(`Parsing invoice ${gi + 1} of ${invoiceGroups.length} (#${group.invoiceNo})...`);
+        setProcessProgress({ current: gi + 1, total: invoiceGroups.length });
+        try {
+          // Merge all pages for this invoice into a single PDF
+          const mergedPdf = await PDFDocument.create();
+          for (const pageFile of group.pages) {
+            const src    = await PDFDocument.load(await pageFile.arrayBuffer());
+            const copied = await mergedPdf.copyPages(src, src.getPageIndices());
+            copied.forEach((p) => mergedPdf.addPage(p));
+          }
+          const mergedBytes = await mergedPdf.save();
+          const mergedFile  = new File(
+            [mergedBytes],
+            `invoice-${group.invoiceNo}.pdf`,
+            { type: 'application/pdf' }
+          );
+          console.log(`[invoice-parse] parsing invoice ${group.invoiceNo} (${group.pages.length} page(s) merged)`);
+
+          const fd  = new FormData();
+          fd.append('file', mergedFile);
+          const res = await fetch('/api/parse-invoice', { method: 'POST', body: fd });
+          if (!res.ok) {
+            console.error(`[invoice-parse] HTTP ${res.status} for invoice ${group.invoiceNo}`);
+            continue;
+          }
+          const json  = await res.json();
+          const items = json.data || [];
+          if (!items.length) {
+            console.warn(`[invoice-parse] no items returned for invoice ${group.invoiceNo}`);
+            continue;
+          }
+
+          const rawNo  = items[0].invoice_no || group.invoiceNo;
+          const normKey = normalizeInvoiceNo(rawNo);
+          invoiceMap[normKey] = {
+            invoice_no:      rawNo,
+            invoice_date:    items[0].invoice_date,
+            customer_name:   items[0].customer_name,
+            customer_city:   items[0].customer_city,
+            customer_state:  items[0].customer_state,
+            customer_pin:    items[0].customer_pin,
+            customer_phone:  items[0].customer_phone,
+            customer_email:  items[0].customer_email,
+            payment_method:  items[0].payment_method,
+            total_amount:    items[0].total_amount,
+            discount_amount: items[0].discount_amount,
+            tax_amount:      items[0].tax_amount,
+            shipping_amount: items[0].shipping_amount,
+            items:           items.map((it) => ({ name: it.name, qty: it.qty, price: it.price })),
+            // label fields (populated later):
             courier_barcode:  null,
             tracking_number:  null,
             courier_name:     null,
             labelMatched:     false,
             _labelPageFile:   null,
+            // pre-merged PDF for upload (no re-merge needed in saveAll):
+            _mergedPdfFile:   mergedFile,
           };
+        } catch (e) {
+          console.error(`[invoice-parse] failed for invoice ${group.invoiceNo}:`, e);
         }
-        invoiceMap[key].items.push({ name: item.name, qty: item.qty, price: item.price });
       }
       setInvoiceParseOrder(Object.values(invoiceMap));
 
@@ -546,42 +611,8 @@ export default function UploadPage() {
     const createdLots = [];
 
     try {
-      // Build invoice_no → page File map by re-parsing each page individually.
-      // Positional mapping is unreliable when multiple PDFs are uploaded or when
-      // pages don't correspond 1-to-1 with invoices.
-      const invoicePageByNo = {};
-      try {
-        setSaveStatus('Splitting invoice PDFs for storage...');
-        const pagesFlat = [];
-        for (const file of invoiceFiles) {
-          const pages = await splitIntoIndividualPages(file);
-          pagesFlat.push(...pages);
-        }
-        setSaveStatus(`Mapping invoice pages... (0 of ${pagesFlat.length})`);
-        for (let i = 0; i < pagesFlat.length; i++) {
-          setSaveStatus(`Mapping invoice pages... (${i + 1} of ${pagesFlat.length})`);
-          try {
-            const fd = new FormData();
-            fd.append('file', pagesFlat[i]);
-            const res = await fetch('/api/parse-invoice', { method: 'POST', body: fd });
-            if (res.ok) {
-              const json = await res.json();
-              const invoiceNo = (json.data?.[0]?.invoice_no) ?? null;
-              if (invoiceNo) {
-                const key = normalizeInvoiceNo(invoiceNo);
-                invoicePageByNo[key] = pagesFlat[i];
-                console.log(`[invoice-pages] page ${i + 1}: invoice_no="${invoiceNo}" → key="${key}"`);
-              } else {
-                console.warn(`[invoice-pages] page ${i + 1}: no invoice_no in response`, json);
-              }
-            } else {
-              console.warn(`[invoice-pages] page ${i + 1}: HTTP ${res.status}`);
-            }
-          } catch (e) {
-            console.warn(`[invoice-pages] page ${i + 1} failed:`, e);
-          }
-        }
-      } catch (e) { console.warn('Invoice PDF split non-critical:', e); }
+      // Invoice PDFs are already merged per-invoice as _mergedPdfFile during processAll.
+      // No re-splitting or re-parsing needed here.
 
       for (const group of groups) {
         setSaveStatus(`Creating lot: ${group.partnerName} (${group.invoices.length} orders)…`);
@@ -670,18 +701,17 @@ export default function UploadPage() {
           });
         } catch (e) { console.warn('Fuzzy match non-critical:', e); }
 
-        // Upload invoice PDFs
+        // Upload invoice PDFs — use pre-merged file produced during processAll
         setSaveStatus(`Uploading invoice PDFs for ${group.partnerName}…`);
         for (const inv of group.invoices) {
-          const orderId  = orderIdByInvoiceNo[inv.invoice_no];
-          const pageFile = invoicePageByNo[normalizeInvoiceNo(inv.invoice_no)];
-          if (!orderId || !pageFile) continue;
+          const orderId = orderIdByInvoiceNo[inv.invoice_no];
+          if (!orderId || !inv._mergedPdfFile) continue;
           try {
             const safe = String(inv.invoice_no).replace(/[^a-zA-Z0-9]/g, '_');
             const path = `invoices/${lot.id}/${safe}.pdf`;
             const { error } = await supabase.storage
               .from('packing-photos')
-              .upload(path, pageFile, { contentType: 'application/pdf', upsert: true });
+              .upload(path, inv._mergedPdfFile, { contentType: 'application/pdf', upsert: true });
             if (!error) {
               const { data: { publicUrl } } = supabase.storage.from('packing-photos').getPublicUrl(path);
               await supabase.from('orders').update({ invoice_pdf_url: publicUrl }).eq('id', orderId);

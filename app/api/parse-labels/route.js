@@ -32,16 +32,24 @@ export async function POST(request) {
             },
             {
               type: 'text',
-              text: `This is a shipping label for a tea company. Extract these fields:
-1. invoice_no: The number after "Invoice No:" or "Order No:" (just the number, e.g. "3602")
-2. courier_barcode: The 11-digit number displayed UNDER the large barcode at the TOP of the label. This is a number like "77752841386". It is NOT the tracking number.
-3. tracking_number: The alphanumeric courier tracking ID near the BOTTOM of the label, like "510890JP0236365"
-4. courier_name: The courier company name (e.g. "BLUEDART", "DELHIVERY", "DTDC")
+              text: `This is a shipping label for a tea company. Extract the following fields:
 
-IMPORTANT: The courier_barcode is the 11-digit number at the TOP of the label under the first/largest barcode. Do NOT confuse it with the order number barcode in the middle or the tracking number at the bottom.
+1. invoice_no — The reference/order number, often shown as "#XXXX" or after "Invoice No:" / "Order No:" (return just the number, e.g. "3602")
+2. courier_barcode — The main tracking barcode number, usually 10–13 characters like "7D128574694" or "7X114290004". It is typically printed under the largest barcode on the label.
+3. tracking_number — Same as courier_barcode if only one barcode number is present.
+4. courier_name — CRITICAL: Identify the ACTUAL COURIER COMPANY BRAND, not the service tier or product name.
+
+COURIER BRAND IDENTIFICATION RULES:
+- Look for the logo or brand name printed prominently on the label (top, corner, or header area). Examples: "DTDC", "BlueDart", "Delhivery", "Ekart", "Shadowfax", "Ecom Express", "XpressBees"
+- IGNORE service-tier codes and product names — these are services WITHIN a courier, NOT courier names:
+  * "SF", "AR", "B2C Smart Express", "B2C Priority", "Surface", "Air", "Priority", "Express" are all DTDC service tiers → return "DTDC"
+  * "Blue Dart Priority", "Blue Dart Surface" → return "BlueDart"
+  * "Delhivery Express" → return "Delhivery"
+- DTDC labels in particular: the "DTDC" logo appears at the top-right corner even when service codes like SF or B2C Smart Express dominate the label — always return "DTDC" if the DTDC logo/brand is visible anywhere
+- If and ONLY if no courier brand or logo is visible anywhere on the label, return whatever text is most prominent
 
 Return ONLY valid JSON, no markdown, no backticks:
-{"invoice_no":"3602","courier_barcode":"77752841386","tracking_number":"510890JP0236365","courier_name":"BLUEDART"}`,
+{"invoice_no":"3602","courier_barcode":"7D128574694","tracking_number":"7D128574694","courier_name":"DTDC"}`,
             },
           ],
         },
